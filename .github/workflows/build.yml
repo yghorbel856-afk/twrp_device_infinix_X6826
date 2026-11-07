@@ -4,6 +4,7 @@ on: workflow_dispatch
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 350
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -14,6 +15,16 @@ jobs:
           haskell: true
           large-packages: false
 
+      - name: Add swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h /
+
       - uses: actions/checkout@v4
         with:
           path: device_tree
@@ -21,52 +32,104 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3 python-is-python3
+          sudo apt install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3 python-is-python3 rsync
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
+          git config --global user.name "builder"
+          git config --global user.email "builder@example.com"
+          git config --global color.ui false
 
       - name: Sync TWRP source
         run: |
-          mkdir ~/twrp && cd ~/twrp
+          mkdir -p ~/twrp && cd ~/twrp
           ~/bin/repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
-          ~/bin/repo sync -c -j8 --force-sync --no-clone-bundle --no-tags
+          for i in 1 2 3; do
+            ~/bin/repo sync -c -j8 --force-sync --no-clone-bundle --no-tags && break
+            echo "sync failed, retry $i"
+            sleep 30
+          done
+          test -f build/envsetup.sh
 
-      - name: Copy device tree
+      - name: Copy and fix device tree
         run: |
+          W=$GITHUB_WORKSPACE/device_tree
           D=~/twrp/device/infinix/Infinix_X6826
           mkdir -p $D
-          SRC=$(dirname "$(find $GITHUB_WORKSPACE/device_tree -type f -name BoardConfig.mk | head -n1)")
-          echo "Device tree found at: $SRC"
-          if [ ! -f "$SRC/BoardConfig.mk" ]; then
-            echo "ERROR: BoardConfig.mk not found"
+
+          # 1) locate the folder that contains BoardConfig.mk (shallowest one)
+          BC=$(find $W -type f -name BoardConfig.mk -not -path '*/.git/*' | awk '{print length($0) " " $0}' | sort -n | head -n1 | cut -d' ' -f2-)
+          if [ -z "$BC" ]; then
+            echo "ERROR: BoardConfig.mk not found in repository"
+            find $W -not -path '*/.git/*' | head -80
             exit 1
           fi
+          SRC=$(dirname "$BC")
+          echo "Device tree folder: $SRC"
           cp -r "$SRC"/. $D/
+          rm -rf $D/.git $D/.github
+          rm -f $D/vendorsetup.sh
+
+          # 2) kernel and dtb must be in prebuilt/
           mkdir -p $D/prebuilt
-          [ -f $D/kernel ] && mv $D/kernel $D/prebuilt/kernel
-          [ -f $D/dtb.img ] && mv $D/dtb.img $D/prebuilt/dtb.img
+          rm -f $D/kernel $D/dtb.img
+          if [ ! -f $D/prebuilt/kernel ]; then
+            K=$(find $W -type f -name kernel -not -path '*/.git/*' | head -n1)
+            if [ -n "$K" ]; then cp "$K" $D/prebuilt/kernel; fi
+          fi
+          if [ ! -f $D/prebuilt/dtb.img ]; then
+            B=$(find $W -type f -name dtb.img -not -path '*/.git/*' | head -n1)
+            if [ -n "$B" ]; then cp "$B" $D/prebuilt/dtb.img; fi
+          fi
           if [ ! -f $D/prebuilt/kernel ] || [ ! -f $D/prebuilt/dtb.img ]; then
-            echo "ERROR: kernel or dtb.img missing"
-            ls -R $D
+            echo "ERROR: kernel or dtb.img missing from repository"
+            find $W -not -path '*/.git/*' | head -80
             exit 1
           fi
-          # replace hyphen with underscore so lunch can parse the name
-          grep -rIl "Infinix-X6826" $D | xargs sed -i '/BUILD_FINGERPRINT/!s/Infinix-X6826/Infinix_X6826/g'
+
+          # 3) remove fingerprint line (can break Android 12 builds, not needed for recovery)
+          sed -i '/^BUILD_FINGERPRINT/d' $D/omni_Infinix-X6826.mk
+
+          # 4) replace hyphen with underscore so lunch can parse the name
+          grep -rIl "Infinix-X6826" $D | xargs -r sed -i 's/Infinix-X6826/Infinix_X6826/g'
           mv $D/omni_Infinix-X6826.mk $D/omni_Infinix_X6826.mk
+
+          # 5) remove obsolete boot control variable
+          sed -i '/^PRODUCT_STATIC_BOOT_CONTROL_HAL/,/libcutils$/d' $D/device.mk
+
+          # 6) extra recovery settings
+          echo "" >> $D/BoardConfig.mk
+          echo 'TW_DEVICE_VERSION := X6826' >> $D/BoardConfig.mk
+          echo 'TW_BRIGHTNESS_PATH := "/sys/class/leds/lcd-backlight/brightness"' >> $D/BoardConfig.mk
+          echo 'TW_MAX_BRIGHTNESS := 255' >> $D/BoardConfig.mk
+          echo 'TW_DEFAULT_BRIGHTNESS := 120' >> $D/BoardConfig.mk
+
           ls -la $D $D/prebuilt
+          echo "----- AndroidProducts.mk -----"
           cat $D/AndroidProducts.mk
+          echo "----- device.mk -----"
+          cat $D/device.mk
 
       - name: Build
         run: |
+          set -o pipefail
           cd ~/twrp
           export ALLOW_MISSING_DEPENDENCIES=true
           source build/envsetup.sh
           lunch omni_Infinix_X6826-eng
-          mka bootimage
+          mka bootimage 2>&1 | tee /home/runner/build.log
 
-      - name: Upload image
+      - name: Upload boot image
         uses: actions/upload-artifact@v4
         with:
           name: twrp-boot
           path: /home/runner/twrp/out/target/product/Infinix_X6826/boot.img
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /home/runner/build.log
+          if-no-files-found: ignore
