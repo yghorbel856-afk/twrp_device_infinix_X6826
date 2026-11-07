@@ -50,6 +50,9 @@ jobs:
             sleep 30
           done
           test -f build/envsetup.sh
+          echo "----- vendor folder -----"
+          ls vendor
+          ls vendor/*/config 2>/dev/null | head -30
 
       - name: Copy and fix device tree
         run: |
@@ -87,17 +90,28 @@ jobs:
             exit 1
           fi
 
-          # 3) remove fingerprint line (can break Android 12 builds, not needed for recovery)
+          # 3) remove fingerprint line (not needed for recovery)
           sed -i '/^BUILD_FINGERPRINT/d' $D/omni_Infinix-X6826.mk
 
           # 4) replace hyphen with underscore so lunch can parse the name
           grep -rIl "Infinix-X6826" $D | xargs -r sed -i 's/Infinix-X6826/Infinix_X6826/g'
           mv $D/omni_Infinix-X6826.mk $D/omni_Infinix_X6826.mk
 
-          # 5) remove obsolete boot control variable
+          # 5) fix vendor path: omni -> twrp (depends on what the source has)
+          if [ -f ~/twrp/vendor/twrp/config/common.mk ]; then
+            sed -i 's#vendor/omni/config/common.mk#vendor/twrp/config/common.mk#g' $D/omni_Infinix_X6826.mk
+          elif [ -f ~/twrp/vendor/omni/config/common.mk ]; then
+            echo "vendor/omni exists, keeping path"
+          else
+            echo "ERROR: neither vendor/twrp nor vendor/omni common.mk exists"
+            ls ~/twrp/vendor
+            exit 1
+          fi
+
+          # 6) remove obsolete boot control variable
           sed -i '/^PRODUCT_STATIC_BOOT_CONTROL_HAL/,/libcutils$/d' $D/device.mk
 
-          # 6) extra recovery settings
+          # 7) extra recovery settings
           echo "" >> $D/BoardConfig.mk
           echo 'TW_DEVICE_VERSION := X6826' >> $D/BoardConfig.mk
           echo 'TW_BRIGHTNESS_PATH := "/sys/class/leds/lcd-backlight/brightness"' >> $D/BoardConfig.mk
@@ -105,10 +119,10 @@ jobs:
           echo 'TW_DEFAULT_BRIGHTNESS := 120' >> $D/BoardConfig.mk
 
           ls -la $D $D/prebuilt
+          echo "----- omni_Infinix_X6826.mk -----"
+          cat $D/omni_Infinix_X6826.mk
           echo "----- AndroidProducts.mk -----"
           cat $D/AndroidProducts.mk
-          echo "----- device.mk -----"
-          cat $D/device.mk
 
       - name: Build
         run: |
