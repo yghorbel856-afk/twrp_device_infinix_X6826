@@ -34,13 +34,12 @@ jobs:
 
       - name: Copy device tree
         run: |
-          D=~/twrp/device/infinix/Infinix-X6826
+          D=~/twrp/device/infinix/Infinix_X6826
           mkdir -p $D
           SRC=$(dirname "$(find $GITHUB_WORKSPACE/device_tree -type f -name BoardConfig.mk | head -n1)")
           echo "Device tree found at: $SRC"
           if [ ! -f "$SRC/BoardConfig.mk" ]; then
             echo "ERROR: BoardConfig.mk not found"
-            find $GITHUB_WORKSPACE/device_tree -not -path '*/.git/*' | head -50
             exit 1
           fi
           cp -r "$SRC"/. $D/
@@ -52,18 +51,22 @@ jobs:
             ls -R $D
             exit 1
           fi
+          # replace hyphen with underscore so lunch can parse the name
+          grep -rIl "Infinix-X6826" $D | xargs sed -i '/BUILD_FINGERPRINT/!s/Infinix-X6826/Infinix_X6826/g'
+          mv $D/omni_Infinix-X6826.mk $D/omni_Infinix_X6826.mk
           ls -la $D $D/prebuilt
+          cat $D/AndroidProducts.mk
 
       - name: Build
         run: |
           cd ~/twrp
           export ALLOW_MISSING_DEPENDENCIES=true
           source build/envsetup.sh
-          lunch omni_Infinix-X6826-eng
+          lunch omni_Infinix_X6826-eng
           mka bootimage
 
       - name: Upload image
         uses: actions/upload-artifact@v4
         with:
           name: twrp-boot
-          path: /home/runner/twrp/out/target/product/Infinix-X6826/boot.img
+          path: /home/runner/twrp/out/target/product/Infinix_X6826/boot.img
