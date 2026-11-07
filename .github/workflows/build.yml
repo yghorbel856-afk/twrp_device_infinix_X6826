@@ -35,11 +35,23 @@ jobs:
       - name: Copy device tree
         run: |
           D=~/twrp/device/infinix/Infinix-X6826
+          mkdir -p $D
+          SRC=$(dirname "$(find $GITHUB_WORKSPACE/device_tree -type f -name BoardConfig.mk | head -n1)")
+          echo "Device tree found at: $SRC"
+          if [ ! -f "$SRC/BoardConfig.mk" ]; then
+            echo "ERROR: BoardConfig.mk not found"
+            find $GITHUB_WORKSPACE/device_tree -not -path '*/.git/*' | head -50
+            exit 1
+          fi
+          cp -r "$SRC"/. $D/
           mkdir -p $D/prebuilt
-          cp -r $GITHUB_WORKSPACE/device_tree/. $D/
-          rm -rf $D/.git $D/.github
-          mv $D/kernel $D/prebuilt/kernel
-          mv $D/dtb.img $D/prebuilt/dtb.img
+          [ -f $D/kernel ] && mv $D/kernel $D/prebuilt/kernel
+          [ -f $D/dtb.img ] && mv $D/dtb.img $D/prebuilt/dtb.img
+          if [ ! -f $D/prebuilt/kernel ] || [ ! -f $D/prebuilt/dtb.img ]; then
+            echo "ERROR: kernel or dtb.img missing"
+            ls -R $D
+            exit 1
+          fi
           ls -la $D $D/prebuilt
 
       - name: Build
