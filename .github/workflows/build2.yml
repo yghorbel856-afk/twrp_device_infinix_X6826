@@ -1,4 +1,4 @@
-name: Build TWRP
+name: Build TWRP v3
 on: workflow_dispatch
 
 jobs:
@@ -19,20 +19,11 @@ jobs:
         run: |
           df -h
           sudo swapoff -a || true
-          sudo fallocate -l 8G /mnt/swapfile
+          sudo fallocate -l 10G /mnt/swapfile || sudo fallocate -l 6G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
           free -h
-
-      - name: Check runner
-        run: |
-          MEM=$(awk '/MemTotal/ {print int($2/1024/1024)}' /proc/meminfo)
-          echo "RAM: ${MEM}GB, CPUs: $(nproc)"
-          if [ "$MEM" -lt 12 ]; then
-            echo "ERROR: runner has too little RAM. Make the repository PUBLIC and run again."
-            exit 1
-          fi
 
       - uses: actions/checkout@v4
         with:
@@ -70,7 +61,6 @@ jobs:
           BC=$(find $W -type f -name BoardConfig.mk -not -path '*/.git/*' | awk '{print length($0) " " $0}' | sort -n | head -n1 | cut -d' ' -f2-)
           if [ -z "$BC" ]; then
             echo "ERROR: BoardConfig.mk not found in repository"
-            find $W -not -path '*/.git/*' | head -80
             exit 1
           fi
           SRC=$(dirname "$BC")
@@ -103,11 +93,21 @@ jobs:
             sed -i 's#vendor/omni/config/common.mk#vendor/twrp/config/common.mk#g' $D/omni_Infinix_X6826.mk
           elif [ ! -f ~/twrp/vendor/omni/config/common.mk ]; then
             echo "ERROR: no common.mk found in vendor"
-            ls ~/twrp/vendor
             exit 1
           fi
 
           sed -i '/^PRODUCT_STATIC_BOOT_CONTROL_HAL/,/libcutils$/d' $D/device.mk
+
+          # FIX 1: enable USB data mode and adbd also on debuggable (eng) builds
+          RC=$(find $D -name "init.recovery.mt6768.rc" | head -n1)
+          echo "init rc: $RC"
+          if [ -n "$RC" ]; then
+            sed -i 's/^on fs && property:ro.debuggable=0$/on fs/' "$RC"
+            grep -n "^on fs" "$RC"
+          fi
+
+          # FIX 2: do not blank the screen at boot (can break Himax TDDI touch)
+          sed -i '/TW_SCREEN_BLANK_ON_BOOT/d' $D/BoardConfig.mk
 
           echo "" >> $D/BoardConfig.mk
           echo 'TW_DEVICE_VERSION := X6826' >> $D/BoardConfig.mk
@@ -124,22 +124,19 @@ jobs:
           export ALLOW_MISSING_DEPENDENCIES=true
           source build/envsetup.sh
           lunch omni_Infinix_X6826-eng
-          mka -j$(nproc) bootimage 2>&1 | tee /home/runner/build.log
+          mka -j2 bootimage 2>&1 | tee /home/runner/build.log
 
       - name: Diagnose failure
         if: failure()
         run: |
-          echo "----- memory / kill messages -----"
-          sudo dmesg | grep -i -E "out of memory|killed process" | tail -20 || true
           free -h
           df -h
-          echo "----- last 60 lines of build log -----"
           tail -60 /home/runner/build.log || true
 
       - name: Upload boot image
         uses: actions/upload-artifact@v4
         with:
-          name: twrp-boot
+          name: twrp-boot-v3
           path: /home/runner/twrp/out/target/product/Infinix_X6826/boot.img
           if-no-files-found: error
 
@@ -147,6 +144,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-v3
           path: /home/runner/build.log
           if-no-files-found: ignore
