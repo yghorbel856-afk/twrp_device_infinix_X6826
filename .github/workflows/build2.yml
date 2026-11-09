@@ -1,4 +1,4 @@
-name: Build TWRP v3
+name: Build TWRP v4
 on: workflow_dispatch
 
 jobs:
@@ -17,13 +17,11 @@ jobs:
 
       - name: Add swap on temp disk
         run: |
-          df -h
           sudo swapoff -a || true
           sudo fallocate -l 10G /mnt/swapfile || sudo fallocate -l 6G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
-          free -h
 
       - uses: actions/checkout@v4
         with:
@@ -46,11 +44,9 @@ jobs:
           ~/bin/repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
           for i in 1 2 3; do
             ~/bin/repo sync -c -j8 --force-sync --no-clone-bundle --no-tags && break
-            echo "sync failed, retry $i"
             sleep 30
           done
           test -f build/envsetup.sh
-          df -h /
 
       - name: Copy and fix device tree
         run: |
@@ -59,55 +55,40 @@ jobs:
           mkdir -p $D
 
           BC=$(find $W -type f -name BoardConfig.mk -not -path '*/.git/*' | awk '{print length($0) " " $0}' | sort -n | head -n1 | cut -d' ' -f2-)
-          if [ -z "$BC" ]; then
-            echo "ERROR: BoardConfig.mk not found in repository"
-            exit 1
-          fi
           SRC=$(dirname "$BC")
-          echo "Device tree folder: $SRC"
           cp -r "$SRC"/. $D/
           rm -rf $D/.git $D/.github
           rm -f $D/vendorsetup.sh
 
           mkdir -p $D/prebuilt
           rm -f $D/kernel $D/dtb.img
-          if [ ! -f $D/prebuilt/kernel ]; then
-            K=$(find $W -type f -name kernel -not -path '*/.git/*' | head -n1)
-            if [ -n "$K" ]; then cp "$K" $D/prebuilt/kernel; fi
-          fi
-          if [ ! -f $D/prebuilt/dtb.img ]; then
-            B=$(find $W -type f -name dtb.img -not -path '*/.git/*' | head -n1)
-            if [ -n "$B" ]; then cp "$B" $D/prebuilt/dtb.img; fi
-          fi
-          if [ ! -f $D/prebuilt/kernel ] || [ ! -f $D/prebuilt/dtb.img ]; then
-            echo "ERROR: kernel or dtb.img missing from repository"
-            exit 1
-          fi
+          K=$(find $W -type f -name kernel -not -path '*/.git/*' | head -n1); cp "$K" $D/prebuilt/kernel
+          B=$(find $W -type f -name dtb.img -not -path '*/.git/*' | head -n1); cp "$B" $D/prebuilt/dtb.img
 
           sed -i '/^BUILD_FINGERPRINT/d' $D/omni_Infinix-X6826.mk
-
           grep -rIl "Infinix-X6826" $D | xargs -r sed -i 's/Infinix-X6826/Infinix_X6826/g'
           mv $D/omni_Infinix-X6826.mk $D/omni_Infinix_X6826.mk
 
           if [ -f ~/twrp/vendor/twrp/config/common.mk ]; then
             sed -i 's#vendor/omni/config/common.mk#vendor/twrp/config/common.mk#g' $D/omni_Infinix_X6826.mk
-          elif [ ! -f ~/twrp/vendor/omni/config/common.mk ]; then
-            echo "ERROR: no common.mk found in vendor"
-            exit 1
           fi
 
           sed -i '/^PRODUCT_STATIC_BOOT_CONTROL_HAL/,/libcutils$/d' $D/device.mk
-
-          # FIX 1: enable USB data mode and adbd also on debuggable (eng) builds
-          RC=$(find $D -name "init.recovery.mt6768.rc" | head -n1)
-          echo "init rc: $RC"
-          if [ -n "$RC" ]; then
-            sed -i 's/^on fs && property:ro.debuggable=0$/on fs/' "$RC"
-            grep -n "^on fs" "$RC"
-          fi
-
-          # FIX 2: do not blank the screen at boot (can break Himax TDDI touch)
           sed -i '/TW_SCREEN_BLANK_ON_BOOT/d' $D/BoardConfig.mk
+
+          # FIX: enable USB/adbd unconditionally (not only on ro.debuggable=0 builds)
+          RC=$(find $D -name "init.recovery.mt6768.rc" | head -n1)
+          sed -i 's/^on fs && property:ro.debuggable=0$/on fs/' "$RC"
+
+          # FIX: mount /vendor early and signal ueventd so firmware (incl. touch) can load
+          # This mirrors the firmware_mounts_complete mechanism found in this device's own init.emmctest.rc
+          cat >> "$RC" << 'EOF'
+
+on post-fs
+    mount erofs /dev/block/by-name/vendor${ro.boot.slot_suffix} /vendor ro
+    wait /vendor
+    trigger firmware_mounts_complete
+EOF
 
           echo "" >> $D/BoardConfig.mk
           echo 'TW_DEVICE_VERSION := X6826' >> $D/BoardConfig.mk
@@ -115,7 +96,8 @@ jobs:
           echo 'TW_MAX_BRIGHTNESS := 255' >> $D/BoardConfig.mk
           echo 'TW_DEFAULT_BRIGHTNESS := 120' >> $D/BoardConfig.mk
 
-          ls -la $D $D/prebuilt
+          echo "----- final rc -----"
+          cat "$RC"
 
       - name: Build
         run: |
@@ -128,15 +110,12 @@ jobs:
 
       - name: Diagnose failure
         if: failure()
-        run: |
-          free -h
-          df -h
-          tail -60 /home/runner/build.log || true
+        run: tail -80 /home/runner/build.log || true
 
       - name: Upload boot image
         uses: actions/upload-artifact@v4
         with:
-          name: twrp-boot-v3
+          name: twrp-boot-v4
           path: /home/runner/twrp/out/target/product/Infinix_X6826/boot.img
           if-no-files-found: error
 
@@ -144,6 +123,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-v3
+          name: build-log-v4
           path: /home/runner/build.log
           if-no-files-found: ignore
