@@ -1,0 +1,128 @@
+name: Build TWRP v4
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+
+      - name: Add swap on temp disk
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 10G /mnt/swapfile || sudo fallocate -l 6G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+
+      - uses: actions/checkout@v4
+        with:
+          path: device_tree
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git-core gnupg flex bison build-essential zip curl zlib1g-dev libc6-dev-i386 libx11-dev lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3 python-is-python3 rsync
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          git config --global user.name "builder"
+          git config --global user.email "builder@example.com"
+          git config --global color.ui false
+
+      - name: Sync TWRP source
+        run: |
+          mkdir -p ~/twrp && cd ~/twrp
+          ~/bin/repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
+          for i in 1 2 3; do
+            ~/bin/repo sync -c -j8 --force-sync --no-clone-bundle --no-tags && break
+            sleep 30
+          done
+          test -f build/envsetup.sh
+
+      - name: Copy and fix device tree
+        run: |
+          W=$GITHUB_WORKSPACE/device_tree
+          D=~/twrp/device/infinix/Infinix_X6826
+          mkdir -p $D
+
+          BC=$(find $W -type f -name BoardConfig.mk -not -path '*/.git/*' | awk '{print length($0) " " $0}' | sort -n | head -n1 | cut -d' ' -f2-)
+          SRC=$(dirname "$BC")
+          cp -r "$SRC"/. $D/
+          rm -rf $D/.git $D/.github
+          rm -f $D/vendorsetup.sh
+
+          mkdir -p $D/prebuilt
+          rm -f $D/kernel $D/dtb.img
+          K=$(find $W -type f -name kernel -not -path '*/.git/*' | head -n1); cp "$K" $D/prebuilt/kernel
+          B=$(find $W -type f -name dtb.img -not -path '*/.git/*' | head -n1); cp "$B" $D/prebuilt/dtb.img
+
+          sed -i '/^BUILD_FINGERPRINT/d' $D/omni_Infinix-X6826.mk
+          grep -rIl "Infinix-X6826" $D | xargs -r sed -i 's/Infinix-X6826/Infinix_X6826/g'
+          mv $D/omni_Infinix-X6826.mk $D/omni_Infinix_X6826.mk
+
+          if [ -f ~/twrp/vendor/twrp/config/common.mk ]; then
+            sed -i 's#vendor/omni/config/common.mk#vendor/twrp/config/common.mk#g' $D/omni_Infinix_X6826.mk
+          fi
+
+          sed -i '/^PRODUCT_STATIC_BOOT_CONTROL_HAL/,/libcutils$/d' $D/device.mk
+          sed -i '/TW_SCREEN_BLANK_ON_BOOT/d' $D/BoardConfig.mk
+
+          # FIX: enable USB/adbd unconditionally (not only on ro.debuggable=0 builds)
+          RC=$(find $D -name "init.recovery.mt6768.rc" | head -n1)
+          sed -i 's/^on fs && property:ro.debuggable=0$/on fs/' "$RC"
+
+          # FIX: mount /vendor early and signal ueventd so firmware (incl. touch) can load
+          # This mirrors the firmware_mounts_complete mechanism found in this device's own init.emmctest.rc
+          cat >> "$RC" << 'EOF'
+
+on post-fs
+    mount erofs /dev/block/by-name/vendor${ro.boot.slot_suffix} /vendor ro
+    wait /vendor
+    trigger firmware_mounts_complete
+EOF
+
+          echo "" >> $D/BoardConfig.mk
+          echo 'TW_DEVICE_VERSION := X6826' >> $D/BoardConfig.mk
+          echo 'TW_BRIGHTNESS_PATH := "/sys/class/leds/lcd-backlight/brightness"' >> $D/BoardConfig.mk
+          echo 'TW_MAX_BRIGHTNESS := 255' >> $D/BoardConfig.mk
+          echo 'TW_DEFAULT_BRIGHTNESS := 120' >> $D/BoardConfig.mk
+
+          echo "----- final rc -----"
+          cat "$RC"
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cd ~/twrp
+          export ALLOW_MISSING_DEPENDENCIES=true
+          source build/envsetup.sh
+          lunch omni_Infinix_X6826-eng
+          mka -j2 bootimage 2>&1 | tee /home/runner/build.log
+
+      - name: Diagnose failure
+        if: failure()
+        run: tail -80 /home/runner/build.log || true
+
+      - name: Upload boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-boot-v4
+          path: /home/runner/twrp/out/target/product/Infinix_X6826/boot.img
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-v4
+          path: /home/runner/build.log
+          if-no-files-found: ignore
