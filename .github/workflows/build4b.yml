@@ -1,4 +1,4 @@
-name: Build TWRP v4
+name: Build TWRP v4b
 on: workflow_dispatch
 
 jobs:
@@ -76,19 +76,10 @@ jobs:
           sed -i '/^PRODUCT_STATIC_BOOT_CONTROL_HAL/,/libcutils$/d' $D/device.mk
           sed -i '/TW_SCREEN_BLANK_ON_BOOT/d' $D/BoardConfig.mk
 
-          # FIX: enable USB/adbd unconditionally (not only on ro.debuggable=0 builds)
           RC=$(find $D -name "init.recovery.mt6768.rc" | head -n1)
           sed -i 's/^on fs && property:ro.debuggable=0$/on fs/' "$RC"
 
-          # FIX: mount /vendor early and signal ueventd so firmware (incl. touch) can load
-          # This mirrors the firmware_mounts_complete mechanism found in this device's own init.emmctest.rc
-          cat >> "$RC" << 'EOF'
-
-on post-fs
-    mount erofs /dev/block/by-name/vendor${ro.boot.slot_suffix} /vendor ro
-    wait /vendor
-    trigger firmware_mounts_complete
-EOF
+          printf '\non post-fs\n    mount erofs /dev/block/by-name/vendor${ro.boot.slot_suffix} /vendor ro\n    wait /vendor\n    trigger firmware_mounts_complete\n' >> "$RC"
 
           echo "" >> $D/BoardConfig.mk
           echo 'TW_DEVICE_VERSION := X6826' >> $D/BoardConfig.mk
